@@ -1,0 +1,37 @@
+# .NET build products and IDE-local state
+**/bin/
+**/obj/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+**/Properties/PublishProfiles/
+
+# Local secrets, credentials, database contents and archives
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+**/secrets.json
+*.pfx
+*.p12
+*.pem
+*.key
+*.bak
+*.mdf
+*.ldf
+*.db
+*.sqlite*
+*.zip
+*.rar
+
+# Generated output
+TestResults/
+coverage/
+*.log
+publish/
+artifacts/
