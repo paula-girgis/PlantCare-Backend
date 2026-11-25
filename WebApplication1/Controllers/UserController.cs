@@ -23,13 +23,15 @@ namespace WebApplication1.Api.Controllers
         private readonly SignInManager<User> signinManager;
         private readonly IEmailService emailService;
         private readonly ILogger<UserController> _logger;
+        private readonly IConfiguration configuration;
 
         public UserController(IGenericRepositry<User> userRepo,
                                AuthService auth,
                                PlantCareContext dbContext,
                                UserManager<User> userManager,
                                SignInManager<User> signInManager,
-                               IEmailService emailService, ILogger<UserController> _logger
+                               IEmailService emailService, ILogger<UserController> _logger,
+                               IConfiguration configuration
                                )
         {
             UserRepo = userRepo;
@@ -39,6 +41,7 @@ namespace WebApplication1.Api.Controllers
             this.signinManager = signInManager;
             this.emailService = emailService;
             this._logger = _logger;
+            this.configuration = configuration;
         }
 
         //[HttpGet("error/{id}")]
@@ -122,7 +125,10 @@ namespace WebApplication1.Api.Controllers
                     { "token" ,token },
                     {"email",user.Email }
                 };
-                var callback = QueryHelpers.AddQueryString("https://plantcarehub.netlify.app/emailConfirmation", param);
+                var frontendOrigin = configuration["PlantCare:FrontendOrigin"]
+                    ?? "https://plantcarehub.paulagirgis123.workers.dev";
+                var confirmationUrl = $"{frontendOrigin.TrimEnd('/')}/emailConfirmation";
+                var callback = QueryHelpers.AddQueryString(confirmationUrl, param);
 
                 await emailService.sendEmailAsync(user.Email, "Email Confirmation", $"Click the link below to confirm your email:\r\n{callback}\r\n\r\n");
                 
@@ -213,8 +219,6 @@ namespace WebApplication1.Api.Controllers
         [HttpGet("emailConfirmation")]
         public async Task<IActionResult> EmailConfirmation([FromQuery] string email , [FromQuery] string token)
         {
-            Console.WriteLine($"Received Token: {token}");
-
             var user = await userManager.FindByEmailAsync (email);
             if (user == null)
                 return BadRequest(new ApiErrorResponse(404,"User not found"));
