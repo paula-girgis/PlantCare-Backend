@@ -1,12 +1,7 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Net.Mail;
-using System.Text;
-using System.Threading.Tasks;
+using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.Extensions.Configuration;
-using Microsoft.IdentityModel.Tokens;
+using MimeKit;
 using WebApplication1.Core.Repositries;
 
 namespace WebApplication1.Service
@@ -22,30 +17,29 @@ namespace WebApplication1.Service
 
         public async Task sendEmailAsync(string to, string subject, string body)
         {
-            
-               var smtpClient = new SmtpClient(configuration["EmailSetting:SmtpServer"])
-                {
-                    Port = int.Parse(configuration["EmailSetting:port"]),
-                   Credentials = new NetworkCredential(configuration["EmailSetting:Username"], configuration["EmailSetting:Password"]),
-                   EnableSsl = true
-                };
-           
+            var settings = configuration.GetSection("EmailSetting");
+            var hostname = settings["SmtpServer"];
+            var username = settings["Username"];
+            var password = settings["Password"];
 
-                var MailMessage = new MailMessage()
-                {
-                    From = new MailAddress(configuration["EmailSetting:From"] ?? "PlantCare <no-reply@example.com>"),
-                    Subject = subject,
-                    Body = body,
-                    IsBodyHtml = true,
-                   
+            if (string.IsNullOrWhiteSpace(hostname) || string.IsNullOrWhiteSpace(username)
+                || string.IsNullOrWhiteSpace(password) || !int.TryParse(settings["port"], out var port))
+            {
+                throw new InvalidOperationException("SMTP settings are incomplete.");
+            }
 
-                };
-            
-                MailMessage.To.Add(new MailAddress(to));
-                await smtpClient.SendMailAsync(MailMessage);
+            var message = new MimeMessage();
+            message.From.Add(MailboxAddress.Parse(settings["From"] ?? username));
+            message.To.Add(MailboxAddress.Parse(to));
+            message.Subject = subject;
+            message.Body = new TextPart("plain") { Text = body };
 
-            
-
+            using var smtpClient = new SmtpClient();
+            var tls = port == 465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls;
+            await smtpClient.ConnectAsync(hostname, port, tls);
+            await smtpClient.AuthenticateAsync(username, password);
+            await smtpClient.SendAsync(new SmtpSendRequest(message));
+            await smtpClient.DisconnectAsync(true);
         }
     }
 }
