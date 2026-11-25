@@ -1,166 +1,148 @@
+using System.Drawing;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
-using System.Text;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using WebApplication1.Api.DTOs;
-using System.Drawing;
-using System.Web.Helpers;
-using System.IO;
-using WebApplication1.Api.Errors;
-using System.Net.Http;
-//using static System.Net.Mime.MediaTypeNames;
 
 namespace WebApplication1.Api.Controllers
 {
-    public class FloraCheckController : ApiBaseController
+    public class FloraCheckController(
+        IConfiguration configuration,
+        IHttpClientFactory httpClientFactory,
+        ILogger<FloraCheckController> logger) : ApiBaseController
     {
-        private readonly IConfiguration _configuration;
-        public FloraCheckController(IConfiguration configuration) => _configuration = configuration;
-
-       
-        private string ConvertImageToBase64(Stream imageStream)
-        {
-            using (var memoryStream = new MemoryStream())
-            {
-                imageStream.CopyTo(memoryStream);
-                byte[] imageBytes = memoryStream.ToArray();
-                return Convert.ToBase64String(imageBytes);
-            }
-        }
-        private string GetImageType(IFormFile file)
-        {
-            if (file == null || file.Length == 0)
-                return null;
-
-            try
-            {
-                using (var stream = file.OpenReadStream())
-                {
-                    using (var image = Image.FromStream(stream))
-                    {
-                        // Return the format of the image (e.g., Jpeg, Png)
-                        return image.RawFormat.ToString(); // This will return something like "Jpeg", "Png", etc.
-                    }
-                }
-            }
-            catch (Exception)
-            {
-                return null;  // Return null if the image format is invalid or the file can't be processed
-            }
-        }
-     
-
-        private const string GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent";
-        private string GEMINI_API_KEY => !string.IsNullOrWhiteSpace(_configuration["Gemini:ApiKey"]) ? _configuration["Gemini:ApiKey"]! : throw new InvalidOperationException("Configure Gemini__ApiKey before using this endpoint.");
+        private const string DefaultGeminiModel = "gemini-3.5-flash-lite";
+        private const string ClassifierUrl = "https://fastflorocheck.onrender.com/predict";
 
         [HttpPost("predict")]
-        public async Task<IActionResult> Predict([FromForm] PredictionRequestDto request)
+        public async Task<IActionResult> Predict([FromForm] PredictionRequestDto request, CancellationToken cancellationToken)
         {
-            if (request.file == null || request.file.Length == 0)
-                return BadRequest("No image provided.");
+            var image = request.file;
+            if (image == null || image.Length == 0)
+                return BadRequest(new { details = "No image provided." });
 
-            if (!request.file.ContentType.StartsWith("image/"))
-                return BadRequest("Uploaded file is not an image.");
+            if (!MediaTypeHeaderValue.TryParse(image.ContentType, out var imageType)
+                || imageType.MediaType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) != true)
+                return BadRequest(new { details = "Uploaded file is not an image." });
+
+            var apiKey = configuration["Gemini:ApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+                return StatusCode(503, new { details = "Plant-care explanations are not configured." });
+
+            var model = configuration["Gemini:Model"];
+            if (string.IsNullOrWhiteSpace(model))
+                model = DefaultGeminiModel;
 
             try
             {
-                using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(50) }) // Set 50 seconds timeout
+                using var client = httpClientFactory.CreateClient();
+                using var upload = new MultipartFormDataContent();
+                var imageContent = new StreamContent(image.OpenReadStream());
+                imageContent.Headers.ContentType = imageType;
+                upload.Add(imageContent, "file", image.FileName);
+
+                using var classification = await client.PostAsync(ClassifierUrl, upload, cancellationToken);
+                if (!classification.IsSuccessStatusCode)
                 {
-                    client.BaseAddress = new Uri("https://fastflorocheck.onrender.com");
-
-                    using (var content = new MultipartFormDataContent())
+                    if (classification.StatusCode == HttpStatusCode.BadRequest
+                        || classification.StatusCode == HttpStatusCode.UnprocessableEntity)
                     {
-                        // Attach the image file
-                        var fileContent = new StreamContent(request.file.OpenReadStream());
-                        fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(request.file.ContentType);
-                        content.Add(fileContent, "file", request.file.FileName);
+                        return BadRequest(new { details = "Upload a clear JPG or PNG of a plant leaf." });
+                    }
 
-                        // Forward the request to Flask
-                        var response = await client.PostAsync("/predict", content);
+                    logger.LogWarning("FloraCheck classifier returned HTTP {Status}.", (int)classification.StatusCode);
+                    return StatusCode(502, new { details = "The plant classifier is temporarily unavailable." });
+                }
 
-                        if (response.IsSuccessStatusCode)
+                using var prediction = JsonDocument.Parse(await classification.Content.ReadAsStringAsync(cancellationToken));
+                var diseaseName = prediction.RootElement.GetProperty("predicted_class").GetString();
+                if (string.IsNullOrWhiteSpace(diseaseName))
+                    return StatusCode(502, new { details = "The plant classifier returned an empty prediction." });
+
+                using var explanationRequest = new HttpRequestMessage(
+                    HttpMethod.Post,
+                    $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent");
+                explanationRequest.Headers.Add("x-goog-api-key", apiKey);
+                explanationRequest.Content = JsonContent.Create(new
+                {
+                    contents = new[]
+                    {
+                        new
                         {
-                            var result = await response.Content.ReadAsStringAsync();
-                            string cleanedResult = result.Replace("\"", " ").Replace("\r", "");
-
-                            var apiUrl = $"{GEMINI_API_URL}?key={GEMINI_API_KEY}";
-
-                            var jsonContent = $@"
-                    {{
-                        ""contents"": [
-                            {{
-                                ""parts"":[{{""text"": ""summerize the Symptoms,Cause and Treatment of {cleanedResult} in 9 lines ,, dont reply by my question ,, or okay ,, reply by your answer only by HTML formatting "" }}]
-                            }}
-                        ]
-                    }}";
-
-                            var newContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-                            using (var chatClient = new HttpClient { Timeout = TimeSpan.FromSeconds(50) }) // Chat client timeout
+                            parts = new[]
                             {
-                                var chatbotResponse = await chatClient.PostAsync(apiUrl, newContent);
-
-                                if (!chatbotResponse.IsSuccessStatusCode)
+                                new
                                 {
-                                    var chatbotError = await chatbotResponse.Content.ReadAsStringAsync();
-                                    return StatusCode((int)chatbotResponse.StatusCode, $"Chatbot API Error: {chatbotError}");
+                                    text = $"The plant image classifier predicted this label: {diseaseName}. Give brief, practical notes on symptoms, likely causes, and care or treatment. If the label indicates a healthy plant, describe healthy signs and preventive care. Treat the label as a prediction, and respond in plain English without HTML or Markdown."
                                 }
-
-                                var chatbotResult = await chatbotResponse.Content.ReadAsStringAsync();
-                                var chatbotReply = JsonDocument.Parse(chatbotResult)
-                                    .RootElement
-                                    .GetProperty("candidates")[0]
-                                    .GetProperty("content")
-                                    .GetProperty("parts")[0]
-                                    .GetProperty("text")
-                                    .GetString();
-
-                                var base64Image = ConvertImageToBase64(request.file.OpenReadStream());
-
-                                var combinedResponse = new
-                                {
-                                    Image = base64Image,
-                                    ImageType = GetImageType(request.file),
-                                    DiseaseName = cleanedResult,
-                                    ChatbotReply = chatbotReply
-                                };
-
-                                return Ok(combinedResponse);
                             }
                         }
-                        else
+                    },
+                    generationConfig = new
+                    {
+                        responseMimeType = "application/json",
+                        responseJsonSchema = new
                         {
-                            var errorMessage = await response.Content.ReadAsStringAsync();
-                            var errorResponse = new
+                            type = "object",
+                            properties = new
                             {
-                                code = "PROCESSING_ERROR",
-                                err = "Unable to process the request. Please try again later.",
-                                details = "Unclear image. Please upload a clear plant leaf image"
-                            };
-                            return StatusCode((int)response.StatusCode, errorResponse);
-                        }
+                                symptoms = new { type = "string" },
+                                cause = new { type = "string" },
+                                treatment = new { type = "string" }
+                            },
+                            required = new[] { "symptoms", "cause", "treatment" }
+                        },
+                        maxOutputTokens = 500
                     }
+                });
+
+                using var explanationResponse = await client.SendAsync(explanationRequest, cancellationToken);
+                if (!explanationResponse.IsSuccessStatusCode)
+                {
+                    logger.LogWarning("Gemini model {Model} returned HTTP {Status}.", model, (int)explanationResponse.StatusCode);
+                    return StatusCode(502, new { details = "Plant-care explanations are temporarily unavailable." });
                 }
-            }
-            catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
-            {
-                var errorResponse = new
+
+                using var envelope = JsonDocument.Parse(await explanationResponse.Content.ReadAsStringAsync(cancellationToken));
+                var parts = envelope.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts");
+                var explanationText = string.Concat(parts.EnumerateArray()
+                    .Where(part => !part.TryGetProperty("thought", out var thought) || thought.ValueKind != JsonValueKind.True)
+                    .Select(part => part.TryGetProperty("text", out var value) ? value.GetString() : null));
+                using var explanation = JsonDocument.Parse(explanationText);
+                var sections = explanation.RootElement;
+                var symptoms = sections.GetProperty("symptoms").GetString();
+                var cause = sections.GetProperty("cause").GetString();
+                var treatment = sections.GetProperty("treatment").GetString();
+                if (string.IsNullOrWhiteSpace(symptoms) || string.IsNullOrWhiteSpace(cause) || string.IsNullOrWhiteSpace(treatment))
+                    return StatusCode(502, new { details = "The plant-care explanation was incomplete." });
+
+                using var imageBytes = new MemoryStream();
+                await using var imageStream = image.OpenReadStream();
+                await imageStream.CopyToAsync(imageBytes, cancellationToken);
+                imageBytes.Position = 0;
+                using var decodedImage = Image.FromStream(imageBytes);
+                return Ok(new
                 {
-                  
-                    err = "Server error: The request timed out."
-                };
-                // Return a custom error message for timeouts
-                return StatusCode( StatusCodes.Status504GatewayTimeout, errorResponse);
+                    Image = Convert.ToBase64String(imageBytes.ToArray()),
+                    ImageType = decodedImage.RawFormat.ToString(),
+                    DiseaseName = diseaseName,
+                    ChatbotReply = $"{EncodeExplanation(symptoms)}\nCause: {EncodeExplanation(cause)}\nTreatment: {EncodeExplanation(treatment)}"
+                });
             }
-            catch (Exception ex)
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                var errorResponse = new
-                {
-                    err = "Server error"
-                };
-                // General error handling
-                return StatusCode(StatusCodes.Status500InternalServerError, errorResponse);
+                return StatusCode(504, new { details = "The plant analysis took too long. Please try again." });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning("FloraCheck could not complete a prediction ({ErrorType}).", ex.GetType().Name);
+                return StatusCode(502, new { details = "The plant analysis could not be completed." });
             }
         }
+
+        // The current UI decodes HTML once before displaying the three sections as HTML.
+        private static string EncodeExplanation(string text) => WebUtility.HtmlEncode(WebUtility.HtmlEncode(text.Trim()));
     }
 }
