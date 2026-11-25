@@ -1,4 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
@@ -52,6 +54,7 @@ namespace WebApplication1.Api.Controllers
         //}
 
         #region get-all-users 
+        [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme, Roles = "Admin")]
         [HttpGet("getall")]
 
         public async Task<ActionResult<IEnumerable<User>>> GetUsers()
@@ -63,7 +66,7 @@ namespace WebApplication1.Api.Controllers
             {
                 return NotFound(new ApiErrorResponse(404));
             }
-            return Ok(users);
+            return Ok(users.Select(user => new { user.Id, user.name, user.Email }));
         }
         #endregion
 
@@ -121,14 +124,7 @@ namespace WebApplication1.Api.Controllers
                     return BadRequest(new ApiErrorResponse(400, $"Something went wrong: {errors}"));
                 }
                 var token = await userManager.GenerateEmailConfirmationTokenAsync(user);
-                var param = new Dictionary<string, string?>{
-                    { "token" ,token },
-                    {"email",user.Email }
-                };
-                var frontendOrigin = configuration["PlantCare:FrontendOrigin"]
-                    ?? "https://plantcarehub.paulagirgis123.workers.dev";
-                var confirmationUrl = $"{frontendOrigin.TrimEnd('/')}/emailConfirmation";
-                var callback = QueryHelpers.AddQueryString(confirmationUrl, param);
+                var callback = BuildFrontendLink("emailConfirmation", token, user.Email);
 
                 await emailService.sendEmailAsync(user.Email, "Email Confirmation", $"Click the link below to confirm your email:\r\n{callback}\r\n\r\n");
                 
@@ -176,13 +172,7 @@ namespace WebApplication1.Api.Controllers
             var resetToken = await userManager.GeneratePasswordResetTokenAsync(user);
 
 
-            var resetLink = Url.Action(
-                "reset-password",
-                "User",
-                new { token = resetToken, email = request.Email },
-                Request.Scheme
-                );
-            resetLink = $"https://plantcarehub.netlify.app/NewPassword?token={Uri.EscapeDataString(resetToken)}&email={request.Email}";
+            var resetLink = BuildFrontendLink("NewPassword", resetToken, request.Email);
 
 
 
@@ -192,7 +182,7 @@ namespace WebApplication1.Api.Controllers
                                              $"If you did not request a password reset, please ignore this message.\r\n\r\nBest regards," +
                                              $"\r\nThe PlantCare Team");
 
-            return Ok(new { Message = "you will receive reset instructions,check your email.", resetLink });
+            return Ok(new { Message = "you will receive reset instructions,check your email." });
         }
         #endregion
 
@@ -230,6 +220,14 @@ namespace WebApplication1.Api.Controllers
             }
 
             return Ok(new { message = "Email verified successfully" });
+        }
+
+        private string BuildFrontendLink(string page, string token, string? email)
+        {
+            var frontendOrigin = configuration["PlantCare:FrontendOrigin"]
+                ?? "https://plantcarehub.paulagirgis123.workers.dev";
+            return QueryHelpers.AddQueryString($"{frontendOrigin.TrimEnd('/')}/{page}",
+                new Dictionary<string, string?> { ["token"] = token, ["email"] = email });
         }
     }
 }
