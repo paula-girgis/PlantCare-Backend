@@ -1,102 +1,63 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using WebApplication1.Api.DTOs;
 using WebApplication1.Api.Errors;
+using WebApplication1.Api.Helpers;
 using WebApplication1.Core.Repositries;
 
 namespace WebApplication1.Api.Controllers
 {
-    public class EviroAnalysisController : ApiBaseController
+    public class EviroAnalysisController(IGenericRepositry<object> repo, GeminiClient gemini) : ApiBaseController
     {
-
-        public EviroAnalysisController(IGenericRepositry<object> repo, IConfiguration configuration)
-        {
-            this.repo = repo;
-            _configuration = configuration;
-        }
-        private const string GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
-        private string GEMINI_API_KEY => !string.IsNullOrWhiteSpace(_configuration["Gemini:ApiKey"]) ? _configuration["Gemini:ApiKey"]! : throw new InvalidOperationException("Configure Gemini__ApiKey before using this endpoint.");
-        private readonly IGenericRepositry<object> repo;
-        private readonly IConfiguration _configuration;
-
         [HttpPost("/analysisBot")]
-        public async Task<IActionResult> eviroAnalysis([FromBody] EviroAnalysisRequestDto request)
+        public async Task<IActionResult> eviroAnalysis([FromBody] EviroAnalysisRequestDto request, CancellationToken cancellationToken)
         {
+            var plantName = request.plantName?.Trim();
+            if (string.IsNullOrWhiteSpace(plantName))
+                return BadRequest(new { details = "You must add a valid plant name." });
+
+            if (!gemini.IsConfigured)
+                return StatusCode(503, new { details = "Environmental advice is not configured." });
+
+            var schema = new
+            {
+                type = "object",
+                properties = new
+                {
+                    validPlant = new { type = "boolean" },
+                    temperature = new { type = "string" },
+                    humidity = new { type = "string" },
+                    soilMoisture = new { type = "string" },
+                    lightIntensity = new { type = "string" }
+                },
+                required = new[] { "validPlant", "temperature", "humidity", "soilMoisture", "lightIntensity" }
+            };
+            var prompt = $"Give concise environmental advice for growing {plantName}. Current measurements: temperature {request.Temperature} degrees Celsius, humidity {request.Humidity}%, soil moisture {request.soilMoisture}%, light intensity {request.lightIntensity} on the user's scale. For each measurement, give the preferred conditions and one practical adjustment if appropriate. Set validPlant to false with empty advice fields if the name does not identify a plant.";
+            var reply = await gemini.GenerateAsync(prompt, cancellationToken, schema);
+            if (reply == null)
+                return StatusCode(502, new { details = "Environmental advice is temporarily unavailable." });
+
             try
             {
-                if (request.plantName == null || !(request.plantName is string))
-                {
-                    return BadRequest(new ApiErrorResponse(500, "You must add a valid plant name"));
-                }
-                var apiUrl = $"{GEMINI_API_URL}?key={GEMINI_API_KEY}";
+                using var result = JsonDocument.Parse(reply);
+                var advice = result.RootElement;
+                if (!advice.GetProperty("validPlant").GetBoolean())
+                    return BadRequest(new { details = "You must add a valid plant name." });
 
+                var temperature = advice.GetProperty("temperature").GetString();
+                var humidity = advice.GetProperty("humidity").GetString();
+                var soilMoisture = advice.GetProperty("soilMoisture").GetString();
+                var lightIntensity = advice.GetProperty("lightIntensity").GetString();
+                if (new[] { temperature, humidity, soilMoisture, lightIntensity }.Any(string.IsNullOrWhiteSpace))
+                    return StatusCode(502, new { details = "The environmental advice was incomplete." });
 
-                var jsonContent = $@"
-                        {{
-                            ""contents"": [
-                                {{
-                                    ""parts"":[{{""text"": ""give me an ideal percentage of each 1.temprature {request.Temperature},2.Humidity ,,{request.Humidity} , 3.soilMoisture {request.soilMoisture} ,4.light intensity{request.lightIntensity} ,, for a healthy soil to produce a healthy {request.plantName} give a response in short answer on each one,if user input is not a plant name give him short message = {request.plantName} is not a valid plant name "" }}]
-                                }}
-                            ]
-                        }}";
-
-                var newContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-                using (var chatClient = new HttpClient())
-                {
-                    // Include the API key in the URL, not in Authorization header
-                    var chatbotResponse = await chatClient.PostAsync(apiUrl, newContent);
-
-                    if (!chatbotResponse.IsSuccessStatusCode)
-                    {
-                        var chatbotError = await chatbotResponse.Content.ReadAsStringAsync();
-                        return StatusCode((int)chatbotResponse.StatusCode, $"Chatbot API Error: {chatbotError}");
-                    }
-
-                    var chatbotResult = await chatbotResponse.Content.ReadAsStringAsync();
-                    var chatbotReply = JsonDocument.Parse(chatbotResult)
-                        .RootElement
-                        .GetProperty("candidates")[0]
-                        .GetProperty("content")
-                        .GetProperty("parts")[0]
-                        .GetProperty("text")
-                        .GetString();
-                    if (chatbotReply.Contains("is not a valid plant name") || chatbotReply.Contains("Not found"))
-                        return BadRequest(new ApiErrorResponse(400, $"{request.plantName} is not valid plant name "));
-
-
-
-                    var temperatureSentence = Regex.Match(chatbotReply, @"\*\*Temperature:\*\* (.+)");
-                    var humiditySentence = Regex.Match(chatbotReply, @"\*\*Humidity:\*\* (.+)");
-                    var soilMoistureSentence = Regex.Match(chatbotReply, @"\*\*Soil Moisture:\*\* (.+)");
-                    var lightIntensitySentence = Regex.Match(chatbotReply, @"\*\*Light Intensity:\*\* (.+)");
-                    string Temperature = temperatureSentence.Success ? temperatureSentence.Groups[1].Value : "Not found";
-                    string Humidity = humiditySentence.Success ? humiditySentence.Groups[1].Value : "Not found";
-                    string soilMoisture = soilMoistureSentence.Success ? soilMoistureSentence.Groups[1].Value : "Not found";
-                    string lightIntensity = lightIntensitySentence.Success ? lightIntensitySentence.Groups[1].Value : "Not found";
-
-                    var response = new
-                    {
-                        Temperature,
-                        Humidity,
-                        soilMoisture,
-                        lightIntensity
-                    };
-
-                    return Ok(response);
-                }
+                return Ok(new { temperature, humidity, soilMoisture, lightIntensity });
             }
-            catch (Exception err)
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
             {
-                Console.WriteLine(err.Message);
-
-                return StatusCode(500, new { Message = "An error occurred while processing your request." });
+                return StatusCode(502, new { details = "The environmental advice could not be read." });
             }
-
         }
-
-
 
         [HttpGet("")]
         public async Task<IActionResult> getEviroAnalysisData()
@@ -106,7 +67,6 @@ namespace WebApplication1.Api.Controllers
                 return BadRequest(new ApiErrorResponse(400, "An error occured"));
             return Ok(data);
         }
-
 
         [HttpGet("{id}")]
         public async Task<IActionResult> getAnalysisById(int id)

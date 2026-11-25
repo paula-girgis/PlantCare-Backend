@@ -1,81 +1,27 @@
-using CloudinaryDotNet;
-using System.Text;
-using System;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Win32;
-using OpenAI_API.Chat;
-using static System.Net.WebRequestMethods;
 using WebApplication1.Api.DTOs;
-using System.Text.Json;
-using System.Net.Http.Headers;
+using WebApplication1.Api.Helpers;
 
 namespace WebApplication1.Api.Controllers
 {
-
-    public class ChatbotController : ApiBaseController
+    public class ChatbotController(GeminiClient gemini) : ApiBaseController
     {
-        private readonly HttpClient _httpClient;
-        private readonly IConfiguration _configuration;
-
-        public ChatbotController(HttpClient httpClient, IConfiguration configuration)
-        {
-            _httpClient = httpClient;
-            _configuration = configuration;
-        }
-        private const string GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent";
-        private string GEMINI_API_KEY => !string.IsNullOrWhiteSpace(_configuration["Gemini:ApiKey"]) ? _configuration["Gemini:ApiKey"]! : throw new InvalidOperationException("Configure Gemini__ApiKey before using this endpoint.");
-
-
         [HttpPost("chat")]
-
-
-       
-        public async Task<IActionResult> AskQuestion([FromBody] ChatbotRequestDto request)
+        public async Task<IActionResult> AskQuestion([FromBody] ChatbotRequestDto request, CancellationToken cancellationToken)
         {
-            var client = new HttpClient();
+            var question = request.question?.Trim();
+            if (string.IsNullOrWhiteSpace(question))
+                return BadRequest(new { details = "Enter a plant-care question." });
 
-            var apiUrl = $"{GEMINI_API_URL}?key={GEMINI_API_KEY}";
+            if (!gemini.IsConfigured)
+                return StatusCode(503, new { details = "Plant-care chat is not configured." });
 
-            var jsonContent = $@"
-        {{
-            ""contents"": [
-                {{
-                    ""parts"":[{{""text"": ""{request.question},, summerize your answer in maximum 10 lines,, dont reply by my question ,, or okay ,, reply by your answer only "" }}]
-                }}
-            ]
-        }}";
+            var prompt = $"Answer the following plant-care question in the same language as the question. Use at most four numbered points in the form '1. Heading: practical advice'. Keep the answer concise, and redirect unrelated questions to plant care. Question: {question}";
+            var reply = await gemini.GenerateAsync(prompt, cancellationToken);
+            if (reply == null)
+                return StatusCode(502, new { details = "Plant-care chat is temporarily unavailable." });
 
-            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-            try
-            {
-                var response = await client.PostAsync(apiUrl, content);
-
-                response.EnsureSuccessStatusCode();
-
-                
-                var responseString = await response.Content.ReadAsStringAsync();
-
-                var responseJson = JsonDocument.Parse(responseString);
-                var chatbotReply = responseJson.RootElement
-                    .GetProperty("candidates")[0]
-                    .GetProperty("content")
-                    .GetProperty("parts")[0]
-                    .GetProperty("text")
-                    .GetString();
-
-                var chatResponse = new chatbotResponseDto
-                {
-                    userQuestion = request.question,
-                    Reply = chatbotReply
-                };
-                return Ok(chatResponse);    
-            }
-            catch (Exception ex)
-            {
-                return BadRequest($"Error: {ex.Message}");
-            }
+            return Ok(new chatbotResponseDto { userQuestion = question, Reply = reply });
         }
     }
 }

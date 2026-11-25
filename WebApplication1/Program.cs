@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using WebApplication1.Api.Errors;
+using WebApplication1.Api.Helpers;
 using WebApplication1.Api.Middlewares;
 using WebApplication1.Core.Entities;
 using WebApplication1.Core.Repositries;
@@ -105,6 +106,7 @@ public class Program
         });
 
         builder.Services.AddHttpClient();
+        builder.Services.AddScoped<GeminiClient>();
 
         #endregion
 
